@@ -1,0 +1,578 @@
+#+title: [[https://people.freebsd.org/~lstewart/articles/cpumemory.pdf][What Every Programmer Should Know About Memory]]
+#+subtitle: Ulrich Drepper, Red Hat, Inc. - Reading Notes
+#+author: Tahsin Ahmed
+#+html_head: <link rel="stylesheet" href="css/style.css" />
+
+* Introduction
+- Memory and storage orders of magnitudes slower than CPUs, requiring special consideration.
+
+* Commodity Hardware Today
+- CPUs connected via front side bus (*FSB*) to Northbridge.
+- Northbridge contains memory controller for RAM.
+- All other peripherals (i.e. PCI, SATA, USB) connected to Southbridge which in is turn connected to the Northbridge.
+- Peripherals have direct memory access (*DMA*) to the RAM meaning that they do not need to interrupt the CPU.
+- Memory controllers can be also integrated into each CPU. Leads to non-uniform memory access (*NUMA*).
+
+** RAM Types
+- Two main RAM types SRAM and DRAM.
+
+*** Static RAM
+- One cell requires six transistors, expensive!
+- But, cell state immediately available for reading soon after raising write access *WL* line.
+- Requires constant power to maintain state.
+
+*** Dynamic RAM
+- One cell requires one transistor and one capacitor.
+- Capacitor leakage requires cells to be constantly refreshed, about once every 64ms.
+- Tiny charge requires amplifier to distinguish between 0 and 1.
+- Signal not immediately available for reading, unlike SRAM.
+- But, cost effective and easy to pack DRAM cells in one chip.
+
+*** DRAM Access
+- DRAM chips organized into 2d array.
+- Upper half of address bits (a.k.a /row address selection/ or \(\overline{RAS}\)) used to select row using demultiplexer.
+- Lower half of address bits (a.k.a /column address selection/ or \(\overline{CAS}\)) used to select column using multiplexer.
+- Addresses passed in two parts to reduce the number of pins.
+
+** DRAM Access Technical Details
+- Two types of DRAM, synchronous (*SDRAM*) and double data rate (*DDR*).
+
+*** Read Access Protocol
+- \(\overline{RAS}\)-to-\(\overline{CAS}\) delay (*t_{RCD}*) is the time between sending \(\overline{RAS}\) signal to sending corresponding \(\overline{CAS}\) signal.
+- \(\overline{CAS}\) latency (*CL*) is the time between sending \(\overline{CAS}\) signal and receiving the data.
+
+*** Precharge and Activation
+- \(\overline{RAS}\) precharge (*t_{RP}*) is the time to deactivate current \(\overline{RAS}\) signal and precharge the next row.
+- Active to precharge delay (*t_{RAS}*) is the time between sending a \(\overline{RAS}\) signal and the earliest moment it can be precharged.
+
+*** Memory Types
+- SDRAM cells output bits at the same frequency as the FSB.
+- DDR1 DRAM output two bits to an I/O buffer per access. Bits are then transferred on both the rising and falling edges of a cycle, effectively doubling the transfer rate.
+- DDR2 DRAM doubles the I/O buffer frequency, but keeps DRAM frequency the same, effectively quadrupling the transfer rate.
+
+* CPU Caches
+- SRAM used in CPU registers and caches, while DRAM is used in main memory.
+
+** CPU Caches in the Big Picture
+- Typically two to three levels of cache in a processor.
+  - L1 cache exclusive to each core, but shared between threads in a core. Often separated into L1i and L1d cache for instruction and data respectively.
+  - L2 cache shared between sets of CPU cores.
+  - L3 cache shared between all CPU cores on a processor.
+
+** Cache Operation at High Level
+- Cache organized into cache lines of 64 bytes or 8 words on a 64-bit system.
+- Memory addresses split into three parts:
+  - Offset (*O*) - the byte offset into the cache line
+  - Cache Set (*S*) - the cache set (or bucket) the address belongs to
+  - Tag (*T*) - unique identifier for differentiating addresses in the same cache set
+- Cache inclusion policies determine how cache lines are evicted in a multi-level cache.
+  - An /inclusive cache/ requires every cache line at a specific level to also be present in all higher cache levels. Easier to evict entries, but slower to load entries from main memory.
+  - An /exclusive cache/ does not require cache lines to be present in higher cache levels. Faster to load from main memory, but harder to evict.
+- Cache coherency refers to multiple CPUs having a uniform view of memory within their local caches.
+  - Dirty cache lines may not be present in other processor's cache for reading and writing.
+  - Multiple clean copies of the same cache line can reside in many caches, causing each of them to be evicted on write.
+
+#+caption: cycles for different levels of cache
+| <c>         | <c>    |
+|-------------+--------|
+| To Where    | Cycles |
+|-------------+--------|
+| Register    | <= 1   |
+| L1d         | ~ 3    |
+| L2          | ~ 14   |
+| Main Memory | ~ 240  |
+
+** CPU Cache Implementation Details
+
+*** Associativity
+- Cache associativity refers to which cache lines can hold which memory locations.
+  - In a /fully associative cache/ each cache line can hold any memory location.
+    - The memory address tag must be compared to the tag of every cache line.
+    - Only practical for small caches like the TLB.
+  - In a /direct-mapped cache/ every address is mapped to exactly one cache line.
+    - Requires only one tag comparison to check if memory is resident in cache.
+    - Cache entries freqeuntly get evicted.
+  - A /set-associative cache/ divides tags into sets.
+    - A multiplexer is used to select a set based on the cache set bits.
+    - The tag is compared against each tag in the cache set.
+    - Doubling the cache associativity effectively doubles the cache size up to a point.
+    - Doubling the number of processors halves the set associativity.
+
+*** Measurements of Cache Effects
+- Experimental Setup: Program creates array of the following struct corresponding to the working set and traverses it in seqeuntial and randomized order.
+
+#+begin_src C
+struct l {
+    struct l *n;
+    long int pad[NPAD];
+}
+#+end_src
+
+- Figure 3.10: Three plateaus corresponding to the L1d and L2 cache sizes.
+- Figure 3.11: L2 access is greater for =NPAD= = 7 because prefetching cannot be done in one cycle. Out of page prefetches and TLB misses cause even greater discrepancies when working set is greater than last level cache.
+- Figure 3.12: Setting stride between elements to be off page causes the number of cycles to be greater due to page faults and TLB misses.
+- Figure 3.13: "Addnext0" performs better than "Inc" because next cache line is prefetched and resident in cache.
+- Figure 3.14: Larger cache size allows for the number of cycles to stay lower for larger working set sizes before the main memory gets involved.
+- Figure 3.15: Randomized access causes the number of cycles to increase exponentially with the working set size.
+- Figure 3.16: Rate of L2 cache misses increases drastically for randomized access as the working set size increases beyond the L2 cache size.
+- Figure 3.17: Randomizing order within sets of consecutive pages causes the number of cycles to asyomptotically plateau as a result of the TLB misses.
+
+*** Write Behavior
+- Two ways of achieving cache coherrency:
+  - In a /write-through cache/ cache lines are immediately written back to main memory after being modified.
+  - In a /write-back cache/ modified cache lines are marked dirty and are written back when evicted.
+
+*** Multi-Processor Support
+- Write-back caches are implemented using the *MESI* cache coherency protocol.
+  - Modified: Local processor modified cache line. Also implies that cache line is exclusive.
+  - Exclusive: Cache line not modified, but only loaded in local processor's cache.
+  - Shared: Cache line not modified, but might exist in other processor's cache.
+  - Invalid: Cache line is invalid.
+- If a cache line is shared and a processor wants to modify it, it must issue a "Request for Ownership" (*RFO*).
+
+**** Multi Threaded Access
+
+- Figure 3.19: Increasing number of threads incurrs penalities even for reading because of the shared access to the FSB.
+- Figure 3.20: Increment workload suffers even greater penalities for greater number of threads because of RFOs and shared FSB traffic.
+- Figure 3.21: Addnextlast workload suffers even greater penalities.
+- Figure 3.22: Speed-up factors only linear w.r.t. the number of threads when workload size is less than L3 cache.
+
+**** Special Case: Hyper-Threads
+- Hyper-threads share L1 cache but have their own CPU registers and cannot run concurrently.
+- Two threads running on one hyper-threaded core is only more efficient than a single thread if the combined runtime of the two threads is less than the single-threaded code.
+
+*** Other Details
+- Should we use physical or virtual addresses in the cache?
+  - Physical addresses are unique, but require MMU translation which is often done after cache fetch.
+  - Virtual addresses may be shared betweeen processes, thus requiring a cache flush for each context switch, but do not require MMU translation.
+- Answer: L1 cache is quick to flush and uses virtual addresses. L2 and L3 caches use physical addresses.
+
+** Instruction Cache
+- Program flow easier to predict than data access and therefore easier to prefetch.
+- CISC processors often cache decoded instructions in L1i cache rather than raw bytes.
+
+*** Self Modifying Code
+- Don't do it.
+
+** Cache Miss Factors
+
+*** Cache and Memory Bandwidth
+- Read, write and copy bandwidths measured for Pentium 4 and Core 2 processors under single and multi thread settings:
+  - Pentium 4
+    - Figure 3.24: Two dropoffs for read bandwidth corresponding to the three cache levels. Write bandwidth for L1 and L2 same because of write-through cache policy of Pentium 4.
+    - Figure 3.25: Bandwidth halved when using two threads.
+  - Core 2
+    - Figure 3.26: Read bandwidth always optimal because of write-back policy of Core 2.
+    - Figure 3.27: RFOs between threads cause the write and copy bandwidths to be lower for the L1 cache than the L2 cache.
+
+*** Critical Word Load
+- Memory is transferred from main memory into cache in words rather than cache lines.
+- CPU can request for the critical word of the cache line to be transferred first rather than in order.
+
+*** Cache Placement
+- Programmers should be conscious about which caches are shared between which cores.
+
+*** FSB Influence
+- FSB transfer speed plays a large role in how fast cache content can be stored and loaded.
+
+* Virtual Memory
+- Virtual address translation done by the memory management unit (*MMU*)
+
+** Simplest Address Translation
+- Virtual address split into two parts:
+  - Top part used to index entry in page directory containing address of page.
+  - Bottom part used as offset into the page.
+
+** Multi-Level Page Tables
+- Modern systems use multi-level page directories typically with 4kB pages.
+- Allows for sparser page tables and for each process to have its own page table.
+- Lower bits in page table entry used for permission bits.
+
+** Optimizing Page Table Access
+- Virtual address translation typically takes multiple memory access corresponding to the number of levels in page table.
+- Storing page tables in L1d and higher level caches too slow and has potential for cache misses.
+- Translation Look-Aside Buffer (*TLB*) is a small, usually fully-associative cache for storing memory address translations.
+
+*** Caveats Of Using A TLB
+- Each process, the operating system, and potentially hypervisiors each have their own virtual address space invalidating TLB entries on context switch.
+- Two ways to deal with this problem:
+  - Flush TLB on context switch.
+    - Flushing TLB is an expensive operation and it may take time to repopulate cache.
+  - Extend tags to TLB entries to uniquely identify which page table tree they belong to.
+
+*** Influencing TLB Performance
+- Larger page sizes can store more data and instructions and require less lookups.
+  - Must find contigious addresses of smaller pages, which can be challenging due to external fragmentation.
+    - Linux preallocates super pages via the =hugetlbfs= filesystem.
+  - Increasing minimum page size can lead to internal fragmentation.
+
+** Impact of Virtualization
+- Virtual machine monitors (*VMM*) or hypervisiors allow for the virtualization of OS images.
+  - VMM maintains page table for each guest OS through which it allocates pages for guests.
+- Modern processors provide hardware support for virtualization (i.e. Intel's EPT and AMD's NPT).
+- KVM module in Linux kernel allows Linux to be used as a hypervisior.
+
+* NUMA Support
+** NUMA Hardware
+- NUMA architecture topologically arranged in hypercube with \(2^C\) nodes, where \(C\) is the number of interconnects (i.e. the number of nodes each node is connected to).
+
+** OS Support for NUMA
+- OS avoids migrating processes or threads between nodes to avoid loosing cache content.
+- OS stripes memory evenly across nodes in order to evenly use system memory and to make it easier to migrate processes between nodes.
+
+** Published Information
+- Cache information available in =/sys/devices/system/cpu/cpu*/cache=.
+- Topology information available in =/sys/devices/system/cpu/cpu*/topology=.
+- NUMA information available in =/sys/devices/system/node=.
+
+** Remote Access Costs
+- The distribution of memory-mapped files, Copy-On-Write pages and anonymous memory over nodes in the system can be viewed via the pseudo-file =/proc/PID/numa_maps=.
+
+* What Programmers Can Do
+** Bypassing the Cache
+- When initializing large data structures for use later it maybe beneficial to bypass the cache.
+- SSE extensions added support for /non-temporal/ writes that bypass the cache.
+  - Uses 128-bit XMM registers and =movntdq= (Move Non-Temporal Double Quadword) instruction.
+- GCC provides instrinsics for these instructions:
+
+    #+begin_src C
+#include <emmintrin.h>
+void _mm_stream_si32(int *p, int a);
+void _mm_stream_si128(int *p, __m128i a);
+void _mm_stream_pd(double *p, __m128d a);
+#include <xmmintrin.h>
+void _mm_stream_pi(__m64 *p, __m64 a);
+void _mm_stream_ps(float *p, __m128 a);
+#include <ammintrin.h>
+void _mm_stream_sd(double *p, __m128d a);
+void _mm_stream_ss(float *p, __m128 a);
+    #+end_src
+
+- Processor's write-combining buffers writes to a single cache line to be committed to memory together. Therefore, it is beneficial to write entire cache lines at once.
+
+    #+begin_src C
+#include <emmintrin.h>
+void setbytes(char *p, int c)
+{
+    __m128i i = __mm_set_epi8(c, c, c, c,
+                            c, c, c, c,
+                            c, c, c, c,
+                            c, c, c, c);
+    _mm_stream_si128((__mm128i *)&p[0], i);
+    _mm_stream_si128((__mm128i *)&p[16], i);
+    _mm_stream_si128((__mm128i *)&p[32], i);
+    _mm_stream_si128((__mm128i *)&p[48], i);
+}
+    #+end_src
+
+- The =setbytes= function above sets all bytes in the cache line to =c=. Note that the pointer =p= must be 16-byte aligned.
+- Some modern processors may also support the =movntdqa= instruction for non-temporal reads using a small number streaming load buffers. Complier also provides intrinsics for this:
+
+    #+begin_src C
+#include <smmintrin.h>
+__m128i _mm_stream_load_si128(__m128i *p);
+    #+end_src
+
+** Cache Access
+*** Optimizing Level 1 Data Cache Access
+    - Improve cache locality
+        - Case Study: Matrix multiplication problem
+            \[(AB)_{ij} = \Sigma_{k=0}^{N-1} a_{ik}b_{kj} = a_{i1}b_{1j} + a_{i2}b_{2j} + \dots + a_{i(N-1)}b_{(N-1)j}\]
+
+        - Attempt 1: Naive matrix multiplication
+
+            #+begin_src C
+for (i = 0; i < N; ++i)
+    for (j = 0; j < N; ++j)
+        for (k = 0; k < N; ++k)
+            res[i][j] += mul1[i][k] * mul2[k][j];
+            #+end_src
+
+            - Matrix \(A\) is accessed in row-order which is cache optimal, but \(B\) is accessed in column-order which is not cache optimal.
+
+        - Attempt 2: Transpose matrix \(B\)
+            \[(AB)_{ij} = \Sigma_{k=0}^{N-1} a_{ik}b_{kj} = a_{i1}b^T_{j1} + a_{i2}b^T_{j2} + \dots + a_{i(N-1)}b^T_{j(N-1)}\]
+
+            #+begin_src C
+double tmp[N][N];
+for (i = 0; i < N; ++i)
+    for (j = 0; j < N; ++j)
+        tmp[i][j] = mul2[j][i];
+for (i = 0; i < N; ++i)
+    for (j = 0; j < N; ++j)
+        for (k = 0; k < N; ++k)
+            res[i][j] += mul1[i][k] * tmp[j][k];
+            #+end_src
+
+            - Up to 76.6% faster, but requires additional memory to store transpose.
+
+        - Attempt 3: Rearrange operations to optimize cache locality
+            - Notice that matrix \(B\) is accessed in the order \((0, 0), (0, 1), \dots, (N-1, 0), (0, 1), (1, 1), \dots\), where elements \((0, 0)\) and \(0, 1)\) are on the same cache line.
+            - Unroll middle loop and handle two iterations at the same time. This allows the prefetched value in \((0, 1)\) to be used before being evicted.
+            - Can do better by unrolling based on the cache line size. Additionally unroll the outer loop as well.
+
+            #+begin_src C
+#define SM (CLS / sizeof (double))
+
+for (i = 0; i < N; i += SM)
+    for (j = 0; j < N; j += SM)
+        for (k = 0; k < N; k += SM)
+            for (i2 = 0, rres = &res[i][j],
+                    rmul1 = &mul1[i][k]; i2 < SM;
+                    ++i2, rres += N, rmul1 += N)
+                for (k2 = 0, rmul2 = &mul2[k][j];
+                        k2 < SM; ++k2, rmul2 += N)
+                    for (j2 = 0; j2 < SM; ++j2)
+                        rres[j2] += rmul1[k2] * rmul2[j2];
+            #+end_src
+
+            - Each matrix is split into blocks of size \((SM, SM)\).
+            - The two outer loops \(i, j\) iterate through the row and column blocks in matrix \(A\) and \(B\) respectively.
+            - The middle loop \(k\) iterates through blocks in each row or column.
+            - The two inner loops \(i2, j2\) itereate through the row and columns of the blocks in matrix \(A\) and \(B\) respectively.
+            - The middle loop \(k2\) iterates through the elements of the \(i2\)-th row of the \((i, k)\)-th block in \(A\).
+            - Pointers \(rmul1\), \(rmul2\) and \(rres\) point to the top left element of the current block in the respective matrix.
+
+    - Align data structures that fit in cache lines
+        - Two ways to memory align structs:
+            1. At allocation:
+                - Dynamic allocation (for heap variables):
+
+                    #+begin_src C
+#include <stdlib.h>
+int posix_memalign(void **memptr, size_t align, size_t size);
+                    #+end_src
+
+                - Automatic allocation (for =.data= and =.bss= variables):
+
+                    #+begin_src C
+struct strtype variable
+__attribute((aligned(64)));
+                    #+end_src
+
+            2. At definition:
+
+                #+begin_src C
+struct strtype {
+    // ...members...
+} __attribute((aligned(64)));
+                #+end_src
+
+                - In case of automatic variables, compiler must ensure that stack pointer is memory aligned at each function call. Can be handled in two ways:
+                    - Generated code actively aligns stack by inserting and removing gaps where necessary.
+                    - Require callers to have the stack aligned by a predetermined offset.
+                    - Can set stack alignment using =-mpreferred-stack-boundary=N=, which sets stack alignment requirement to \(2^N\).
+
+                - Preventing conflict misses
+                - L1d cache is not small enough to be fully associative, but also does not have the same associativity as the L2 cache.
+                - Can lead to objects in a working set being mapped to the same cache set, thereby causing unnecessary cache evictions (i.e. /conflict miss/).
+                - Fortunately, L1d is indexed by virtual address which the programmer has control over.
+                    - Sequential addresses are less likely to be in the same cache set.
+                    - Store variables that are frequently accessed together near each other.
+
+*** Optimizing Level 1 Instruction Cache Access
+- Three ways to optimize L1i usages:
+  1. Reduce code size balanced with inlining and loop unrolling.
+     - GCC offers various optimization levels such as -O2 and -O3. Can also optimize for code size using -Os.
+     - Inlining functions refers to directly inserting code at point of invocation.
+       - Avoids cache miss penalities associated with branching. Good if function is rarely used.
+       - However, if a function is frequently used it is better to not inline to avoid decoding instructions twice.
+       - Add =always_inline= attribute to inline functions. Add =noinline= attribute to not inline functions.
+       - Can use =-finline-limit= to control how large a function can be to be able to be inlined.
+  2. Avoid bubbles in code execution by hinting likely branches.
+     - GCC recognizes =__builtin_except= for hinting likely branches.
+
+        #+begin_src C
+long __builtin_except(long EXP, long C);
+        #+end_src
+
+     - Define macros for use with boolean expressions.
+
+        #+begin_src C
+#define unlikely(expr) __builtin_except(!!(expr), 0)
+#define likely(expr) __builtin_except(!!(expr), 1)
+        #+end_src
+
+     - Compile with =-freorder-blocks= to allow GCC to reorder based on hints.
+  3. Align code if it makes sense to do so.
+     - Maybe beneficial to align frequently executed code to the cache line.
+     - Three main places where alignment is most useful:
+       - At the beginning of functions
+         - Use =-falign-functions=N= to align to \(2^N\) boundaries.
+         - Compiler inserts no-op instructions between code at little cost.
+       - At the beginning of basic blocks reached by jumps
+         - Use =-falign-jumps=N= to algin to \(2^N\) boundaries.
+       - At the beginning of loops
+         - Use =-falign-loops=N= to align to \(2^N\) boundaries.
+         - Can be achieved in two ways:
+           - Inserting no-op instructions before the beginning of the loop
+           - Using a jump to the beginning of the loop
+         - Both have an added cost of either executing additional no-ops or branching.
+
+*** Optimizing Level 2 and Higher Cache Access
+- All the optimizations for L1 cache applies to L2 and higher caches.
+- However, higher level caches have greater cache miss penalities.
+- Additionally, L2 cache and above have varying cache sizes unlike L1 cache.
+
+*** Optimizing TLB Usage
+- Two ways to improve TLB performance:
+  1. Reduce the number of pages used by program, which directly reduces the number of page faults.
+  2. Make TLB lookup cheaper by reducing number of higher level directories.
+     - Can disable Address Space Layout Randomization (*ASLR*) to make code segments contingious in memory.
+       - May result in code that is more vulnerable to attackers.
+
+** Prefetching
+*** Hardware Prefetching
+- Triggered by two or more cache misses in a certain pattern.
+  - Cannot prefetch on every cache miss because access maybe random.
+- Prefetcher has no knowledge of the OS and therefore cannot prefetch across page boundaries.
+
+*** Software Prefetching
+- GCC provides intrinsics for triggering prefetches:
+
+    #+begin_src C
+#include <xmmintrin.h>
+enum _mm_hint
+{
+    _MM_HINT_T0 = 3,
+    _MM_HINT_T1 = 2,
+    _MM_HINT_T2 = 1,
+    _MM_HINT_NTA = 0
+};
+void _mm_prefetch(void *p, enum _mm_hint h);
+    #+end_src
+
+    - =_MM_HINT_T0= fetches to L1d cache and above.
+    - =_MM_HINT_T1= fetches to L2 cache and above.
+    - =_MM_HINT_T2= fetches to L3 cache.
+    - =_MM_HINT_NTA= stands for non-temporal align and avoids polluting the cache.
+
+- GCC can automatically insert prefetch instructions for arrays in loops using =-fprefetch-loop-arrays=.
+
+*** Special Kind of Prefetch: Speculation
+- Processors may speculatively load data from potentially conflicting instructions.
+
+*** Helper Threads
+- Hyper threads can prefetch data for the main thread into the L2 or even L1d cache.
+- libNUMA API can be used to find the NUMA hiearchy of the current processor:
+
+    #+begin_src C
+#include <libNUMA.h>
+ssize_t NUMA_cpu_level_mask(size_t destsize,
+                            cpu_set_t *dest,
+                            size_t srcsize,
+                            const cpu_set_t *src,
+                            unsigned int level);
+    #+end_src
+
+    - The =dst= set is the set in which the NUMA hiearchy will be loaded in.
+    - The =src= set is the current set of processors the process is pinned to.
+
+- If =level=1= this function can be used to find sibling hyper threads:
+
+    #+begin_src C
+cpu_set_t self;
+NUMA_cpu_self_current_mask(sizeof(self), &self);
+
+cpu_set_t hts;
+NUMA_cpu_level_mask(sizeof(hts), &hts, sizeof(self), &self, 1);
+
+CPU_XOR(&hts, &hts, &self);
+    #+end_src
+
+    - The =hts= cpu set is XOR-ed with the =self= cpu set to remove the =self= set from the =hts= set, leaving only the sibling hyper threads.
+
+*** Direct Cache Access
+- Network Interface Cards (NICs) have DMA to main memory, but the OS still needs to load the data to cache to read packet headers.
+- NICs can directly load packet headers into CPU cache before raising a signal on the CPU.
+  - Northbridge sends cache lines on the FSB using the DCA flag, which the processor can periodically snoop on.
+
+** Multi-Thread Operation
+*** Concurrency Operations
+- Multiple threads writing to the same cache line causes many RFO messages to be sent, leading to increased latency.
+- Read-only variables can be marked =const=, which puts them in a special =.rodata= (or =.data.rel.ro=) section.
+- Read-mostly variables can explicitly be put in their own section using the =__attribute__= keyword.
+
+  #+begin_src C
+int foo = 1;
+int bar __attribute__((section(".data.ro"))) = 2;
+int baz = 3;
+int xyzzy __attribute__((section("data.ro"))) = 4;
+  #+end_src
+
+- Threads can also have their own thread-local variables using the =__thread= keyword.
+
+  #+begin_src C
+  int foo = 1;
+  __thread int bar = 2;
+  int baz = 3;
+  __thread int xyzzy = 4;
+  #+end_src
+
+  - Thread-local storage (TLS) have an initialization overhead. Additionally all threads must pay the price for the TLS even if only one variable uses it.
+- General advice for handling cache in concurrent programming:
+  1. Separate read-only and read-write variables and maybe even read-mostly variables.
+  2. Group read-write variables that are used together into a struct.
+  3. Move read-write variables that are often written by different threads to their own cache line.
+  4. Consider using TLS if variable is used by multiple threads, but independently.
+
+*** Atomicity Optimizations
+- Despite the MESI protocol requiring cache lines to be in the 'E' state before modification, it is still possible for simultaneous access to lead to incoherent results.
+  - Ex: If two threads attempt to increment a variable at the same time, the processor can still read the old value while the cache line is in the 'S' state. This leads to the second increment operation to be executed on the old stale value.
+- Processors provide four types of atomic operations depending on the architecture:
+  - Bit Test - Set or clear bit and return status of operation.
+  - Load Lock/Store Conditional - LL instruction to start transaction and SC instruction to update value if it hasn't been update in the meantime.
+  - Compare-and-Swap (CAS) - Write value to address only if current value is another parameter value.
+  - Atomic Arithmetic - Arithmetic and logic operations on memory locations only available on x86 or x86-64 architectures.
+- Both CAS and LL/SC are equivalent and can be used to implement atomic arithmetic operaitons.
+
+    #+caption: Atomic addition using CAS
+    #+begin_src C
+int curval;
+int newval;
+do {
+   curval = var;
+   newval = var + addend;
+} while (CAS(&var, curval, newval));
+    #+end_src
+
+    #+caption: Atomic addition using LL/SC
+    #+begin_src C
+int curval;
+int newval;
+do {
+    curval = LL(var);
+    newval = curval + addend;
+} while (SC(var, newval));
+    #+end_src
+
+*** Bandwidth Considerations
+- Processes on different cores often compete for the FSB bandwidth. Therefore, it is important to pin processes with the same working set to the same set of cores or vice versa.
+- Compiler intrinsics for getting/setting process affinities:
+
+    #+begin_src C
+#define _GNU_SOURCE
+#include <sched.h>
+
+int sched_setaffinity(pid_t pid, size_t size, const cpu_set_t *cpuset);
+int sched_getaffinity(pid_t pid, size_t size, cpu_set_t *cpuset);
+    #+end_src
+
+- Process can also get the current CPU using the =sched_getcpu= interface:
+
+    #+begin_src C
+#define _GNU_SOURCE
+#include <sched.h>
+int sched_getcpu(void);
+    #+end_src
+
+- Equivalent API for getting/setting thread affinities:
+
+    #+begin_src C
+#define _GNU_SOURCE
+#include <pthread.h>
+int pthread_setaffinity_np(pthread_t th, size_t size, const cpu_set_t *cpuset);
+int pthread_getaffinity_np(pthread_t th, size_t size, cpu_set_t *cpuset);
+int pthread_attr_setaffinity_np(pthread_attr_t *at, size_t size, const cpu_set_t *cpuset);
+int pthread_attr_getaffinity_np(pthread_attr_t *at, size_t size, cpu_set_t *cpuset);
+    #+end_src

@@ -1,0 +1,5 @@
+#+title: Tahsin's Notes
+#+author: Tahsin Ahmed
+#+html_head: <link rel="stylesheet" href="css/style.css" />
+
+- [[file:cpumemory_Drepper2007.org][What Every Programmer Should Know About Memory]]
