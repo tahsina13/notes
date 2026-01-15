@@ -526,7 +526,6 @@ int xyzzy __attribute__((section("data.ro"))) = 4;
   - Atomic Arithmetic - Arithmetic and logic operations on memory locations only available on x86 or x86-64 architectures.
 - Both CAS and LL/SC are equivalent and can be used to implement atomic arithmetic operaitons.
 
-    #+caption: Atomic addition using CAS
     #+begin_src C
 int curval;
 int newval;
@@ -536,7 +535,6 @@ do {
 } while (CAS(&var, curval, newval));
     #+end_src
 
-    #+caption: Atomic addition using LL/SC
     #+begin_src C
 int curval;
 int newval;
@@ -576,3 +574,122 @@ int pthread_getaffinity_np(pthread_t th, size_t size, cpu_set_t *cpuset);
 int pthread_attr_setaffinity_np(pthread_attr_t *at, size_t size, const cpu_set_t *cpuset);
 int pthread_attr_getaffinity_np(pthread_attr_t *at, size_t size, cpu_set_t *cpuset);
     #+end_src
+
+** NUMA Programming
+*** Memory Policy
+- Linux supports the following policies in NUMA architecture:
+  - =MPOL_BIND= - Memory only allocated from given set of nodes.
+  - =MPOL_PREFERRED= - Memory preferably allocated from given set of nodes.
+  - =MPOL_INTERLEAVE= - Memory equally allocated from given set of nodes.
+  - =MPOL_DEFAULT= - Choose allocation based on defaults for the region.
+- VMA mempolicy takes precedence over the task mempolicy.
+- Task mempolicy takes precedence over the system default mempolicy.
+
+*** Specifying Policies
+- Policy for the current thread can be set using =set_mempolicy=:
+
+    #+begin_src C
+#include <numaif.h>
+long set_mempolicy(int mode, unsigned long *nodemask, unsigned long maxnode);
+    #+end_src
+
+    - The mode can be any one of =MPOL_*=.
+
+*** Swapping and Policies
+- If a dirty page is swapped into swap memory, it may be allocated to a different memory node when it is swapped back.
+
+*** VMA Policy
+- The mempolicy for an address range can be set using =mbind=:
+
+    #+begin_src C
+#include <numaif.h>
+long mbind(void *start, unsigned long len,
+          int mode,
+           unsigned long *nodemask,
+           unsigned long maxnode,
+           unsigned flags);
+    #+end_src
+
+    - By default flags is set to zero and does not affect already allocated pages.
+    - Otherwise, the flags can be set to modify the default behavior:
+      - =MPOL_MF_STRICT= - Fail is not all pages are on the nodes specified by =nodemask=.
+      - =MPOL_MF_MOVE= - Kernel will try to move all pages in the process's page table to the nodes in =nodemask=.
+      - =MPOL_MF_MOVEALL= - Kernel will try to move all pages in VMA, not just those in the process's page table to the nodes in =nodemask=.
+
+*** Querying Node Information
+- Current mempolicy for an address can be retrieved using =get_mempolicy=:
+
+    #+begin_src C
+#include <numaif.h>
+long get_mempolicy(int *policy,
+                   const unsigned long *nmask,
+                   unsigned long maxnode,
+                   void *addr, int flags);
+    #+end_src
+
+- The memory node(s) associated with a processor can be determined using =NUMA_cpu_to_memnode=:
+
+    #+begin_src C
+int NUMA_cpu_to_memnode(size_t cpusetsize,
+                        const cpu_set_t *cpuset,
+                        size_t memnodesize,
+                        memnode_set_t *memnodeset);
+    #+end_src
+
+- The reverse can also be obtained using =NUMA_memnode_to_cpu=:
+
+    #+begin_src C
+int NUMA_memnode_to_cpu(size_t memnodesize,
+                        const memnode_set_t *memnodeset,
+                        size_t cpusetsize,
+                        cpu_set_t *cpuset);
+    #+end_src
+
+*** CPU and Node Sets
+- If the source code is not available mempolicies can also be set using CPU sets.
+- To use CPU sets a special filesystem must be mounted:
+
+    #+begin_src sh
+mount -t cpuset none /dev/cpuset
+    #+end_src
+
+    - Initially the current CPUs, memory nodes and processes can be viewed using the =cpus=, =mems= and =tasks= pseudo files respectively.
+    - To create a new CPU set simplify create a new directory in the hiearchy and modify the =cpus=, =mems= and =tasks= files.
+
+* Memory Performance Tools
+** Memory Operation Profiling
+- Oprofile on Linux can be used to profile hardware level events.
+
+** Simulating CPU Caches
+- In cases where running the program with oprofile is not possible, the cachegrind tool within valgrind can be used to simulate cache behavior:
+
+    #+begin_src sh
+valgrind --tool=cachegrind command arg
+    #+end_src
+
+- By default, cachegrind uses the system memory layout. It is possible, however, to change the cache size, cache associativity and cache line size using the =--I1=, =--D1= and =--L2= parameters for the respective caches:
+
+    #+begin_src sh
+valgrind --tool=cachegrind --L2=8388608,8,64 command arg
+    #+end_src
+
+    - The above uses an 8MB L2 cache with 8-way associavity and 64-byte cache line size.
+
+** Measuring Memory Usage
+- The massif tool in valgrind can be used to measure how much memory a program allocates:
+
+    #+begin_src sh
+valgrind --tool=massif command arg
+    #+end_src
+
+** Improving Branch Prediction
+- It is possible to improve branch prediction using profile guided optimization (PGO):
+  1. Compile all source profiles using the =-fprofile-generate= option, this will generate a =.gcno= file for each input file.
+  2. Run the program using a representative workload, this will generate =.gcda= files.
+  3. Recompile program using =-fprofile-use= option.
+
+** Page Fault Optimizations
+- To optimize page faults the program needs to use fewer pages. This can be done by rearranging the object files to fill as few pages as possible.
+- When using =mmap=, if the memory will immediately be used, the =MAP_POPULATE= flag can be used to immediately allocate pages rather than on demand.
+- Some architectures may also support larger page sizes using the =hugetlbfs= pseudo filesystem.
+  - Admins can specify the number of huge pages by modifying the file =/proc/sys/vm/nr_hugepages=.
