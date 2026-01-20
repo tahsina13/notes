@@ -1,0 +1,534 @@
+#+title: [[https://pages.cs.wisc.edu/~remzi/OSTEP/][Operating Systems: Three Easy Pieces]]
+#+subtitle: Part 2: Concurrency - Reading Notes
+#+author: Tahsin Ahmed
+#+html_head: <link rel="stylesheet" href="../css/style.css" />
+
+* Concurrency and Threads
+- Threads have their own program counter and registers, but unlike processes share the same address space.
+
+** Why Use Threads?
+- Two reasons to use threads:
+  - Increase parallelism of code.
+  - Allow other code to run in the event of slow I/O.
+** An Example: Thread Creation
+- Threads can be scheduled in any order by the operating system.
+
+** Why It Gets Worse: Shared Data
+- Without synchronization, the interleaving of instructions can lead to threads accessing stale data.
+
+** The Heart Of The Problem: Uncontrolled Scheduling
+- Example instructions for updating a counter:
+
+    #+begin_src asm
+mov 0x8049a1c, %eax
+add $0x1, %eax
+mov %eax, 0x8049a1c
+    #+end_src asm
+
+    - Thread 1 runs initial load instruction and get preempted.
+    - Thread 2 is scheduled and increments the counter.
+    - Thread 1 finished incrementing the counter but on the old value.
+    - This is called a *race condition* or a *data race*.
+
+** The Wish For Atomicity
+- Could have an atomic add operation:
+
+    #+begin_src asm
+memory-add 0x8049a1c, $0x1
+    #+end_src
+
+- Not scalable with other operations that may require synchronization.
+- Hardware provides *synchronization primitives* to help build locks.
+
+** One More Problem: Waiting For Another
+- *Condition variables* can be used to sleep on a condition and wakeup when that condition changes.
+
+* Interlude: Thread API
+- In POSIX, ~pthread~ library used to create and manage threads.
+
+** Thread Creation
+- To create a thread use ~pthread_create~:
+
+    #+begin_src C
+#include <pthread.h>
+int pthread_create(pthread_t *thread,
+                   const pthread_attr_t *attr,
+                   void *(*start_routine)(void*),
+                   void *arg);
+    #+end_src
+
+    - *Function pointer* used to specify entrypoint of thread.
+
+** Thread Completition
+- Calling thread can wait for a child thread to finish using ~pthread_join~:
+
+    #+begin_src C
+int pthread_join(pthread_t thread, void **value_ptr);
+    #+end_src
+
+    - Thread must be initialized using the ~pthread_create~ function.
+    - The return value of the thread will be stored in value pointer. Since the return value can be anything the argument is a pointer to ~(void *)~.
+
+** Locks
+- The POSIX threads library also provides mechanism for locks for use in *critical sections* of code:
+
+    #+begin_src C
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+    #+end_src
+
+- Alternative methods for acquiring locks:
+
+    #+begin_src C
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+int pthread_mutex_timedlock(pthread_mutex_t *mutex, struct timespec *abs_timeout);
+    #+end_src
+
+** Condition Variables
+- *Condition Variables* can be used to wait on and signal the change of a condition between threads:
+
+    #+begin_src C
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+int pthread_cond_signal(pthread_cond_t *cond);
+    #+end_src
+
+    - Must hold the associated mutex before calling either wait or signal.
+
+* Locks
+** Locks: The Basic Idea
+- Locks are variables used to protect critical sections of code. A lock can be either *available* (or free) or *acquired* (or held).
+
+** Pthread Locks
+ - Implementation of locks in POSIX library is a *mutex*.
+
+** Building A Lock
+- Building a lock requires special hardware support.
+
+** Evaluating Locks
+- Three criteria to evaluate locks by:
+  - Does it achieve *mutal exclusion*?
+  - Is it fair? Does each contending thread get a fair shot of acquiring the lock?
+  - How much overhead in acquiring / releasing the lock?
+
+** Controlling Interrupts
+- One simple way of implementing locks is by disabling interrupts when entering the critical section and enabling it upon exit.
+  - Only works in single processor systems.
+  - Requires user to have privileged access to enable / disable interrupts.
+
+** A Failed Attempt: Just Using Loads/Stores
+- Can use flag to indicate status of the lock, but instructions for setting variables maybe interleaved.
+
+** Building Working Spin Locks with Test-And-Set
+- *Test-And-Set* instruction sets a variable to a value and returns the old value.
+
+    #+begin_src C
+int TestAndSet(int *old_ptr, int new) {
+    int old = *old_ptr;
+    *old_ptr = new;
+    return old;
+}
+    #+end_src
+
+- Implement *spin lock* by repeatedly trying to set value to 1, until the old value is 0.
+  - If the return value is 1, the lock is unavailable and nothing happens.
+  - If the return value is 0, the lock was set to 1 and has been acquired.
+
+    #+caption: Spin lock using TestAndSet
+    #+begin_src C
+typedef struct __lock_t {
+    int flag;
+} lock_t;
+
+void init(lock_t *lock) {
+    lock->flag = 0;
+}
+
+void lock(lock_t *lock) {
+    while (TestAndSet(&lock->flag, 1) == 1)
+        ; // spin
+}
+
+void unlock(lock_t *lock) {
+    lock->flag = 0;
+}
+    #+end_src
+
+** Evaluating Spin Locks
+- Spin locks do not guarantee fairness because a process can hoard a lock.
+- Spin locks can waste CPU cycles and require OS preemption to work correctly.
+
+** Compare-And-Swap
+- *Compare-And-Swap* instruction sets value of a pointer if the value pointed to is equal to an expected value. Return original value.
+
+    #+begin_src C
+int CompareAndSwap(int *ptr, int expected, int new) {
+    int original = *ptr;
+    if (original == expected) {
+        *ptr = new;
+    }
+    return original;
+}
+    #+end_src
+
+- Implement *spin lock* by repeatedly trying to set value to 1, if old value is 0.
+
+    #+caption: Sping lock using CompareAndSwap
+    #+begin_src C
+void lock(lock_t *lock) {
+    while (CompareAndSwap(&lock->flag, 0, 1) == 1)
+        ; // spin
+}
+    #+end_src
+
+** Load-Linked and Store-Conditional
+- *Load-linked* fetches value from memroy, but *store-conditional* succeeds in updating the value only if it has not been updated in the meanwhile.
+
+    #+begin_src C
+int LoadLinked(int *ptr) {
+    return *ptr;
+}
+
+int StoreConditional(int *ptr, int value) {
+    if (no update to *ptr since LL to this addr) {
+        *ptr = value;
+        return 1;
+    } else {
+        return 0;
+    }
+}
+    #+end_src
+
+- Implement *spin lock* by load-linking current lock value and trying to set value to 1 if currently 0.
+
+    #+caption: Spin lock using LL/SC
+    #+begin_src C
+void lock(lock_t *lock) {
+    while (LoadLinked(&lock->flag) ||
+           !StoreConditional(&lock->flag, 1))
+        ; // spin
+}
+    #+end_src
+
+** Fetch-And-Add
+- *Fetch-And-Add* instruction atomically increments value pointed to by a pointer.
+
+    #+begin_src C
+int FetchAndAdd(int *ptr) {
+    int old = *ptr;
+    *ptr = old + 1;
+    return old;
+}
+    #+end_src
+
+- Implement special *ticket lock* using fetch-and-add:
+  - When locking atomically increment ticket value, which is now the current thread's turn.
+  - When unlocking increment turn value to pass lock to the next thread. Lock already acquired no need for atomic increment.
+  - Lock is acquired when ~(myturn == turn)~.
+
+    #+caption: Ticket lock using FetchAndAdd
+    #+begin_src C
+typedef struct __lock_t {
+    int ticket;
+    int turn;
+} lock_t;
+
+void lock_init(lock_t *lock) {
+    lock->ticket = 0;
+    lock->turn = 0;
+}
+
+void lock(lock_t *lock) {
+    int myturn = FetchAndAdd(&lock->ticket);
+    while (lock->turn != myturn)
+        ; // spin
+}
+
+void unlock(lock_t *lock) {
+    lock->turn = lock->turn + 1;
+}
+    #+end_src
+
+    - Ticket lock more fair because each thread will eventually get a turn according the to the order in which they try to lock.
+
+** A Simple Approach: Just Yield, Baby
+- Can yield CPU if failed to acquire lock to avoid spending CPU cycles.
+- Does not avoid starvation, thread may get stuck in endless yeild loop. When to wakeup?
+
+** Using Queues: Sleeping Instead of Spinning
+- Solaris provides ~park~ and ~unpark~ methods to put a thread to sleep and wakeup a thread.
+- Use queue to wakeup the next thread trying to acquire the lock.
+
+** Different OS, Different Support
+- Linux provides ~futex_wait~ and ~futex_wakeup~ system calls with internally managed queues.
+
+** Two-Phase Locks
+- Hybrid approach, spin for X number of cycles then go to sleep.
+
+* Lock-based Concurrent Data Structures
+** Concurrent Counters
+- *Monitor* based approach to building thread-safe counter. Protect counter with lock. Simple but not scalable.
+- *Approximate counters* designed to be more scalable:
+  - One /local/ physical counter per thread thread plus one /global/ physical counter each protected by a lock.
+  - Threads increment their own local counter and periodically add the accumulated value to the global counter when the global lock is acquired.
+  - Threshold \(S\) used to determine how often local-to-global transfer occurs:
+    - Small \(S\) -> behaves like non-scalable counter
+    - Larger \(S\) -> more scalable, but less accurate
+
+** Concurrent Linked List
+- *Hand-over-hand locking* (a.k.a. *lock coupling*) used to make linked list more concurrent:
+  - Each node maintains its own lock to its data.
+  - Before traversing to next node, acquire its lock, then release lock on current node.
+
+** Concurrent Queues
+- Two locks for head and tail of queue respectively.
+
+** Concurrent Hash Table
+- One lock per hash bucket.
+
+* Condition Variables
+- Sometimes threads are waiting for a *condition* to be true rather than acquiring locks for critical sections.
+  - For example, waiting for a child thread to finish execution.
+
+** Definition and Routines
+- *Condition variables* are queues that threads can put themselves on to wait for a certain condition.
+  - Consumers are considered *waiting* on the condition.
+  - Producers can wakeup the next waiting consumer by *signaling* on the condition.
+
+** Producer/Consumer (Bounded Buffer) Problem
+- Two types of threads:
+  - *Producers* generate data and place them in queues.
+  - *Consumers* get data from the queue and consume them.
+- Initial broken solution (assume buffer of length 1):
+
+  #+begin_src C
+int loops;
+pthread_cond_t cond;
+pthread_mutex_t mutex;
+
+void *producer(void *arg) {
+    int i;
+    for (i = 0; i < loops; i++) {
+        pthread_mutex_lock(&mutex);
+        if (count == 1)
+            pthread_cond_wait(&cond, &mutex);
+        put(i);
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
+    }
+}
+
+void *consumer(void *arg) {
+    int i;
+    for (i = 0; i < loops; i++) {
+        pthread_mutex_lock(&mutex);
+        if (count == 0)
+            pthread_cond_wait(&cond, &mutex);
+        int temp = get();
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
+    }
+}
+  #+end_src
+
+  - Two major issues with above solution:
+    - Problem #1:
+      - Consumer C_1 finds ~(code == 0)~ and waits on condition. Producer P_1, produces a value and signals on the condition, but before C_1 wakes up, consumer C_2 has already consumed the value without waiting.
+      - Solution: Use a ~while~ loop instead of an ~if~ statement.
+      - In *Mesa semantics* the condition may not remain not true after thread has woken up (i.e. this case). In *Hoare semantics* the condition must remain true after the thread has woken up.
+    - Problem #2:
+      - If consumer C_1 holds the lock while both consumer C_2 and producer P_1 are sleeping, which thread should consumer C_1 signal after it has finished consuming the value?
+      - Solution: Use different condition variables to condition on producers and consumers.
+
+** Convering Conditions
+- Possible to wakeup all waiting consumers using ~pthread_cond_broadcast~.
+
+* Semaphores
+- Semaphores can be used as either a lock or a condition.
+
+** Semaphores: A Definition
+- A semaphore is an object with an integer value that can be manipulated using two methods:
+  - ~sem_wait~: Decrement the semaphore and wait until its value is non-negative.
+  - ~sem_post~: Increment the semaphore.
+- A negative semaphore value indicates the number of threads waiting for the semaphore.
+
+** Binary Semaphore (Locks)
+- Semaphores can be used as locks by setting the initial value to 1.
+
+  #+begin_src C
+sem_t m;
+sem_init(&m, 0, 1);
+
+sem_wait(&m);
+// critical section
+sem_post(&m);
+  #+end_src
+
+** Semaphores For Ordering
+- Semaphores can also be used as condition variables by setting the initial value to 0.
+
+  #+begin_src C
+sem_t s;
+
+void *child(void *arg) {
+    printf("child\n");
+    sem_post(&s);
+    return NULL;
+}
+
+int main(int argc, char *argv[]) {
+    sem_init(&s, 0, 0);
+    printf("parent: begin\n");
+    pthread_t c;
+    pthread_create(&c, NULL, child, NULL);
+    sem_wait(&s);
+    printf("parent: end\n");
+    return 0;
+}
+  #+end_src
+
+  - Here the semaphore is used to join on the child thread:
+    - If the parent runs first it will find that the semaphore is 0 and wait for it to become 1.
+    - If the child runs first it will increment the semaphore allowing the parent to run immediately.
+
+** The Producer/Consumer (Bounded Buffer) Problem
+- Extend problem to include buffers of known fixed size.
+- Initial broken solution:
+
+  #+begin_src C
+void *producer(void *arg) {
+    int i;
+    for (i = 0; i < loops; i++) {
+        sem_wait(&mutex);
+        sem_wait(&empty);
+        put(i);
+        sem_post(&full);
+        sem_post(&mutex);
+    }
+}
+
+void *consumer(void *arg) {
+    int i;
+    for (i = 0; i < loops; i++) {
+        sem_wait(&mutex);
+        sem_wait(&full);
+        int temp = get();
+        sem_post(&empty);
+        sem_post(&mutex);
+        printf("%d\n", tmp);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    sem_init(&empty, 0, MAX);
+    sem_init(&full, 0, 0);
+}
+  #+end_src
+
+  - Problem:
+    - Acquiring locks in this order may lead to deadlock. Initially if the consumer locks ~mutex~ and is waiting on ~full~, the producer cannot generate a value because it is also waiting for ~mutex~.
+    - Solution: Acquire ~mutex~ after acquiring ~full~. This limits the number of producers and consumers while also protecting the critical section of getting and putting data.
+
+** Reader-Writer Locks
+- *Reader-writer locks* allow multiple readers at a time, but only one writer at a time.
+  - Can lead to starvation of writers if there is a constant stream of readers. Can be solved using queues.
+  - Requires more synchronization overhead compared to regular locks.
+
+** The Dinning Philosophers
+- There are \(N\) professors sitting at a round table with one fork between each pair of professors:
+  - They each are either thinking or dining.
+  - When dinning each professor needs both forks on either side.
+- Initial broken solution:
+  - Each professors first acquires their left fork followed by the right fork.
+  - Problem: Each profesesor may grab their left fork before any other professor is able to grab their right fork creating a *deadlock*.
+  - Solution: Break the dependency, have the last professor get their right fork before their left fork.
+
+** Thread Throttling
+- Semaphores can be used to throttle or limit the number of threads allowed in a performance critical section.
+
+** How To Implement Semaphores
+- Semaphores can be implemented using mutexes and condition variables.
+
+* Common Concurrency Problems
+** What Types Of Bugs Exist?
+- Two types of bugs: deadlock and non-deadlock.
+
+** Non-Deadlock Bugs
+- Most common type of concurrency bug.
+- Atomicity-Violation Bugs:
+  - Caused by not using atomic variables or locks in the correct places.
+- Order-Violation Bugs:
+  - Caused by not using condition variables to correctly order dependent events.
+
+** Deadlock Bugs
+- Deadlocks occur when two threads are both waiting for locks held by the other thread.
+- Conditions for deadlocks:
+  - Mutual exclusion: Thread claim exclusive access to resources.
+  - Hold-and-wait: Threads hold resources allocated to them.
+  - No preemption: Resources cannot be forcibly removed from threads.
+  - Circular wait: There exists a circular chain of threads trying to acquire threads held by another.
+- Deadlock prevention tries to break one of the conditions needed for deadlock:
+  - Circular wait: Enforce a total or at least a partial ordering for acquiring locks.
+  - Hold-and-wait: Acquire all locks atomically. Can be done by first acquiring a big lock first.
+  - No preemption: Try to acquire lock, but fail if it is already acquired. Can lead to *livelock*.
+  - Mutual exclusion: Use *lock-free* or *wait-free* data structures.
+- If information about the locks needed are known, the OS can try to optimally schedule processes to avoid deadlocks.
+- Deadlocks can also be detected by building a dependency graph as locks are acquired. This can be especially helpful if deadlocks are rare and it is less costly to occasionally let deadlocks happen rather than preventing them.
+
+* Event-based Concurrency (Advanced)
+** The Basic Idea: An Event Loop
+- Another way to do concurrency is by handling events in a loop.
+
+** An Important API: ~select()~ (or ~poll()~)
+- The ~select()~ system call used to find file descriptors ready for reading or writing:
+
+  #+begin_src C
+int select(int nfds,
+           fd_set *restrict readfds,
+           fd_set *restrict writefds,
+           fd_set *restrict errorfds,
+           struct timeval *restrict timeout);
+  #+end_src
+
+  - If timeout is ~NULL~ then will block indefinitely until an event is available.
+
+** Using ~select()~
+- Use ~FD_ZERO()~ and ~FD_SET()~ to create initial file descriptor sets.
+- Use ~FD_ISSET()~ to check while file descriptors have data.
+
+** Why Simpler? No Locks Needed
+- No locks are needed because everything is running on one thread and thereofre cannot be preempted.
+
+** A Problem: Blocking System Calls
+- Systems calls can still block the event loop leading to no work being done.
+
+** A Solution: Asynchronous I/O
+- Modern OS allow for issuing asynchronous I/O requests to disk.
+- The APIs use *AIO control blocks*:
+
+  #+begin_src C
+struct aiocb {
+    int aio_fildes;
+    off_t aio_offset;
+    volatile void *aio_buf;
+    size_t aio_nbytes;
+}
+  #+end_src
+
+- Issue an aysnc read using ~aio_read()~:
+
+  #+begin_src C
+int aio_read(struct aiocb *aiocbp);
+  #+end_src
+
+- Poll status of read operation using ~aio_error()~:
+
+  #+begin_src C
+int aio_error(const struct aiocb *aiocbp);
+  #+end_src
+
+** Another Problem: State Management
+- Using async I/O requires packaging state for the next event handler. Known commonly as *manual stack management*.
+
+** What Is Still Difficult With Events
+- Running multiple instances of the event loop across multiple cores still requires locks.
+- Pagefaults cannnot be controlled or avoided and may block the event loop.

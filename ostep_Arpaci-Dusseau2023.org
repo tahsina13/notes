@@ -1,0 +1,7 @@
+#+title: [[https://pages.cs.wisc.edu/~remzi/OSTEP/][Operating Systems: Three Easy Pieces]]
+#+subtitle: Remzi and Andrea Arpaci-Dusseau, University of Wisonsin-Madison - Reading Notes
+#+author: Tahsin Ahmed
+#+html_head: <link rel="stylesheet" href="css/style.css" />
+#+options: toc:nil num:nil
+
+* [[file:ostep_Arpaci-Dusseau2023/part2.org][Part 2: Concurrency]]
