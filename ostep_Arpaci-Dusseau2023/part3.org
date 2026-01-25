@@ -71,7 +71,224 @@
 - Disk scheduling often done by the disk's firmware since the OS has no knowledge of the geometry of the disk.
 
 * Redundant Disk Arrays (RAID)
+- *Redundant Array of Inexpensive Disks (RAID)* is a way to combine disks to build bigger, faster and more reliable disks.
+
+** Interface And RAID Internals
+- RAID controller internally redirects I/O to disk, and externally presents a larger disk to the system.
+
+** Fault Model
+- In *fail-stop* fault model disks are either working or dead.
+
+** How To Evaluate RAID
+- RAID setup is evalulated along three axes:
+  - *Capacity*: How much useful space is available to the user?
+    - Let \(B\) be the max capacity of a single block.
+  - *Reliability*: How many disk faults can the setup tolerate?
+  - *Performance*: How well does the setup perform under a given workload?
+    - We consider two workloads sequential and random.
+    - Assume the max sequential bandwidth is \(S\) MB/s for a single disk.
+    - Similarily max random bandwidth is \(R\) MB/s for single disk.
+
+** RAID Level 0: Striping
+- RAID-0 *stripes* logical blocks in a round robin fashion.
+
+  #+caption: RAID-0: Striping
+  | Disk 0 | Disk 1 | Disk 2 | Disk 3 |
+  |--------+--------+--------+--------|
+  | 0      | 1      | 2      | 3      |
+  | 4      | 5      | 6      | 7      |
+  | 8      | 9      | 10     | 11     |
+  | 12     | 13     | 14     | 15     |
+
+- Can also change the *chunk size* to reduce seek times between disks.
+
+  #+caption: Striping with bigger chunks
+  | Disk 0 | Disk 1 | Disk 2 | Disk 3 |
+  |--------+--------+--------+--------|
+  | 0      | 2      | 4      | 6      |
+  | 1      | 3      | 5      | 7      |
+  | 8      | 10     | 12     | 14     |
+  | 9      | 11     | 13     | 15     |
+
+- Capacity: \(N * B\).
+- Reliability: \(0\).
+- Performance:
+  - Sequential: \(N * S\) MB/s for both reads and writes.
+  - Random: \(N * R\) MB/s for both reads and writes.
+
+** RAID Level 1: Mirroring
+- RAID-1 *mirrors* disk onto another disk.
+
+  #+caption: RAID-1: Mirroring
+  | Disk 0 | Disk 1 | Disk 2 | Disk 3 |
+  |--------+--------+--------+--------|
+  | 0      | 0      | 1      | 1      |
+  | 2      | 2      | 3      | 3      |
+  | 4      | 4      | 5      | 5      |
+  | 6      | 6      | 7      | 7      |
+
+  - Can arrange disksin different ways:
+    - *RAID-10*, *stripe of mirrors*
+    - *RAID-01*, *mirror of stripes*
+
+- Capacity: \(\frac{N}{2} * B\).
+- Redundancy: \(\frac{N}{2}\).
+- Performance:
+  - Sequential:
+    - Writes: \(\frac{N}{2} * S\) MB/s because we need to write to both disks for a single block.
+    - Reads: \(\frac{N}{2} * S\) MB/s also.
+      - Assume that we alternate when sending I/O. Send read of 0 to disk 0, read of 1 to disk 2, read of 2 to disk 0, etc.
+      - Each disk skips over every other blocks and thus only achieves half its total bandwidth.
+  - Random:
+    - Writes: \(\frac{N}{2} * R\) MB/s.
+    - Reads: \(N * R\) MB/s.
+
+** RAID Level 4: Saving Space With Parity
+- RAID-4 achieves redundancy by dedicating one disk to storing the *parity* of each stripe. The partiy is the bitwise XOR of all blocks in a stripe.
+
+  #+caption: RAID-4: Parity
+  | Disk 0 | Disk 1 | Disk 2 | Disk 3 | Disk 4 |
+  |--------+--------+--------+--------+--------|
+  | 0      | 1      | 2      | 3      | P0     |
+  | 4      | 5      | 6      | 7      | P1     |
+  | 8      | 9      | 10     | 11     | P2     |
+  | 12     | 13     | 14     | 15     | P3     |
+
+- Capacity: \((N-1) * B\).
+- Redundancy: \(1\).
+- Performance:
+  - Sequential:
+    - Writes: \((N-1) * S\) MB/s, entire stripe is written at once so parity is computed and written at write time.
+    - Reads: \((N-1) * S\) MB/s, one disk contains redundant parity information.
+  - Random:
+    - Writes: \(\frac{R}{2}\) MB/s, parity disk is bottleneck and must be updated with each block update, even if the blocks updated are on separate disks. Thus these updates cannot happen in parallel and therefore cannot be amortized.
+    - Reads: \((N-1) * R\) MB/s.
+
+** RAID Level 5: Rotating Parity
+- RAID-5 is idential to RAID-4 except that it rotates the parity block between drives.
+
+  #+caption: RAID-5: Rotating Parity
+  | Disk 0 | Disk 1 | Disk 2 | Disk 3 | Disk 4 |
+  |--------+--------+--------+--------+--------|
+  | 0      | 1      | 2      | 3      | P0     |
+  | 5      | 6      | 7      | P1     | 4      |
+  | 10     | 11     | P2     | 8      | 9      |
+  | 15     | P3     | 12     | 13     | 14     |
+  | P4     | 16     | 17     | 18     | 19     |
+
+- Capacity: \((N-1) * B\).
+- Redundancy: \(1\).
+- Performance:
+  - Sequential:
+    - Writes: \((N-1) * S\) MB/s.
+    - Reads: \((N-1) * S\) MB/s.
+  - Random:
+    - Writes: \(\frac{N}{4} * R\) MB/s, still generates \(4\) I/O requests.
+    - Reads: \(N * R\) MB/s, can utilize all disks unlike RAID-4.
+
 * Interlude: Files and Directories
+** Files And Directories
+- Two abstractions provided by the file system:
+  - A *file* is a linear array of bytes.
+  - A *directory* contains files.
+  - Both are backed by inodes.
+
+** The File System Interface
+- Unix provides a common interface to access the file system.
+
+** Creating Files
+- Files can be created by using ~open()~ with the ~O_CREAT~ flag.
+
+  #+begin_src C
+int fd = open("foo", O_CRAT|O_WRONLY|O_TRUNC, S_IRUSR|S_IWUSR);
+  #+end_src
+
+  - Returns a file descriptor which can later be used to access the file.
+    - File descriptors are private to each process.
+
+** Reading And Writing Files
+- *strace* program can be used to trace syscalls in Linux.
+- Use ~read()~ and ~write()~ with the file descriptor as an argument to read and write to file.
+
+** Reading And Writing, But Not Sequentially
+- Can seek to random location within the file using ~lseek()~.
+
+  #+begin_src C
+off_t lseek(int fildes, off_t offset, int whence);
+  #+end_src
+
+  - The offset is w.r.t. to a set location within the file:
+    - ~SEEK_SET~ for beginning of the file.
+    - ~SEEK_CUR~ for current offset within the file.
+    - ~SEEK_END~ for end of the file.
+
+- OS keeps track of per file offset for each process.
+
+  #+begin_src C
+struct file {
+    int ref;
+    char readable;
+    char writeable;
+    struct inode *ip;
+    uint off;
+}
+  #+end_src
+
+- Aside: Also possible to map file offsets to memory addresses using ~mmap()~.
+
+** Shared File Table Entries: ~fork()~ And ~dup()~
+- When a parent process forks it copies the file table to the child process.
+  - Increases the *reference count* of the underlying file object.
+- The ~dup()~ sycalls (and its friends ~dup2()~ and ~dup3()~) is used to assign a new fd to an already existing open file.
+  - Used by the shell to redirect input and output.
+
+** Writing Immediately With ~fsync()~
+- The file system will often buffer writes in memory to achieve better performance.
+- A process can force writes to a file using ~fsync()~.
+
+** Renaming Files
+- Files can be renamed using the ~rename()~ syscall (or the ~mv~ command in the shell).
+
+** Getting Information About Files
+- Metadata about a file can be obtained using the ~sync()~ or ~fsync()~ syscalls.
+  - Metadata stored within a ~struct stat~.
+
+** Removing Files
+- File can be removed using the ~unlink()~ syscall. But why not ~remove~ or ~delete~?
+
+** Making Directories
+- To create a directory use the ~mkdir()~ syscall.
+
+** Reading Directories
+- Directories are special files maintained by the file system. Can be accessed using the ~opendir()~, ~readdir()~ and ~closedir()~ syscalls.
+
+** Deleting Directories
+- To delete a directory use the ~rmdir()~ syscall.
+
+** Hard Links
+- A hard link within the file system can be created using the ~link()~ syscall (or ~ln~ in the shell).
+  - Adds another entry within a directory pointing to an already existing inode.
+  - Inode keeps a reference count of the number of directories containing it.
+  - The inode is freeded only once its reference count reaches zero, hence why the remove syscall is called unlink.
+
+** Symbolic Links
+- Hard links are somewhat limited:
+  - Cannot create hard link to directory due to infinite recursion.
+  - Cannot create hard link across mounted file systems.
+- A *symbolic link* or *soft link* maintains its own inode, but its contents point to another path.
+  - Can be created using ~ln -s~ flag in the shell.
+  - May potentially lead to a dangling reference.
+
+** Permission Bits And Access Control Lists
+- *Permission bits* used to control who has access to which files.
+- Three permission groups: owner, group and other.
+- Three permission modes: read, write and execute.
+- Distributed file systems may use *access control lists* for more fine-grained access.
+
+** Making And Mounting A File System
+- A new file system can be formatted onto a device using ~mkfs~.
+- The ~mount()~ / ~umount()~ syscalls can be used to mount a device formatted with a file system on a directory.
+
 * File System Implementation
 ** The Way To Think
 - All file systems consist of two parts:
