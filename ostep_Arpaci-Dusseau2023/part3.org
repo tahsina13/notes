@@ -1,0 +1,326 @@
+#+title: [[https://pages.cs.wisc.edu/~remzi/OSTEP/][Operating Systems: Three Easy Pieces]]
+#+subtitle: Part 3: Persistence - Reading Notes
+#+author: Tahsin Ahmed
+#+html_head: <link rel="stylesheet" href="../css/style.css" />
+
+* I/O Devices
+** System Architecture
+- CPU attached to main memory via a *memory bus*.
+- Faster devices connected via an *I/O bus* typically *PCI* or *PCIe* (i.e. GPU and SSD).
+- Slower devices connected via *peripheral bus* like *SCSI*, *SATA* or *USB* (i.e. disks, mouse, keyboard).
+
+** A Cannonical Device
+- Devices have two main components:
+  - An external hardware interface it presents to the rest of the system.
+  - An internal structure used to implement the functions of the device.
+
+** The Cannonical Protocol
+- Device interfaces typically consist of three registers:
+  - *Status* register to query the current state of the device.
+  - *Command* register to issue commands to the device.
+  - *Data* register to pass input and retrieve output.
+- The CPU polls the device by repeatedly reading the status register.
+
+** Lowering CPU Overhead With Interrupts
+- Rather than polling, the device can interrupt the CPU using an *interrupt handler* when it is done.
+  - Allows the CPU to run another task while waiting.
+
+** More Efficient Data Movement With DMA
+- Alternatively the device can also use *Direct Memory Access (DMA)* to directly transfer data to the main memory before interrupting the CPU.
+
+** Methods Of Device Interaction
+- Two ways to interact with devices:
+  - Send explicit *I/O instructions* via specific device registers.
+  - Access specified memory addresses via *memory mapped I/O* made available by the hardware.
+
+** Fitting Into The OS: The Device Driver
+- Device drivers used to abstract the intrinsics of communicating with devices.
+- Up to 70% of the Linux kernel code is device driver code.
+
+* Hard Disk Drives
+** The Interface
+- Hard disk can be viewed as an array of sectors numbered from \(0\) to \(n - 1\).
+  - Writes to sectors are atomic.
+
+** Basic Geometry
+- Hard disk consists of *platters* bound together by a rotating *spindle*.
+- Data contained within concentric circles around each platter known as a *track*.
+- *Disk heads* per platter used to read and write data from tracks.
+
+** A Simple Disk Drive
+- Disk drive consists of three types of delays:
+  - Rotational delay: The time needed to rotate the track to the specific sector.
+  - Seek time: The time needed to move the disk head to the appropriate track.
+  - Transfer time: The time needed to perform I/O operations (i.e. read / write).
+- On reads disk may also read adjacent tracks which are placed in its internal cache.
+- On writes disk may write to cache and defer writing to disk for later.
+
+** I/O Time: Doing The Math
+- Total I/O delay can be calculated using:
+  \[T_{I/O} = T_{seek} + T_{rotation} + T_{transfer}\]
+- The rate of I/O can be calculated using:
+  \[R_{I/O} = \frac{Size_{transfer}}{T_{I/O}}\]
+
+** Disk Scheduling
+- *Shortest Seek Time First (SSTF)*: Services requests on tracks nearest to the current disk head.
+  - May lead to starvation of sectors on farther tracks.
+- *Elevator (SCAN)*: Service requests in order of most inner track to outer track and back again.
+  - Strongly favors middle tracks because they are serviced twice for every one time an inner/outer track is serviced.
+  - *C-SCAN*: Like SCAN, but restart at inner track each time. More fair to outer and inner tracks.
+- *Shortest Positioning Time First (SPFT)*: Like SSTF but also considers rotational delay as well as seek time.
+- Disk scheduling often done by the disk's firmware since the OS has no knowledge of the geometry of the disk.
+
+* Redundant Disk Arrays (RAID)
+* Interlude: Files and Directories
+* File System Implementation
+** The Way To Think
+- All file systems consist of two parts:
+  - What are the on-disk data structures used to organize metadata and data?
+  - How is the file system data accessed?
+
+** Overall Organization
+- File system divides the disk into roughly four parts:
+  - *Superblock*: Stores file system metadata (i.e. what type of file system).
+  - *Bitmaps*: Indicates which blocks are valid or invalid.
+  - *Inode table*: Stores inode metadata (i.e. size, type etc).
+  - *Data Region*: Stores file contents.
+
+** File Organization: The Inode
+- Each file is backed by a low-level name called an i-number.
+- Each inode in the inode table stores several *direct pointers* to data.
+  - The last pointer is an *indirect pointer* to a data block containing more direct pointers.
+  - Can also have *multi-level indirect pointers*.
+
+** Directory Organization
+- Directories are special types of "files" maintained by the file system containing mapping from names to inodes.
+  - Every directory contains at least two entries =.= and =..= referring to the current and parent directory respectively.
+
+** Free Space Management
+- Some file systems pre-allocate data blocks to files to ensure that they are contigious.
+
+** Access Paths: Reading and Writing
+- Reading a file from disk:
+  1. Resolve the pathname to find the corresponding inode. Requires traversing the file system. Traversal starts at the root node =/=.
+  2. Lookup the inode in the inode table using its i-number.
+  3. Find the data block for the offset by following direct (or indirect) pointers.
+- Writing a file to disk:
+  - Same as reading from a disk except that blocks maybe allocated.
+
+** Caching and Buffering
+- File system may cache popular blocks in main memory.
+  - *LRU cache* used to evict least recently block from cache.
+- *Write buffering* used to batch multiple writes to a block as one I/O request.
+
+* Loaclity and The Fasl File System
+** The Problem: Poor Performance
+- Disk is not a random access device!
+- Overtime disks can become fragmented reducing performance.
+
+** FFS: Disk Awareness Is The Solution
+- *Fast File System (FFS)* designed to be improve performance by being "disk aware".
+
+** Organizing Structure: The Cylinder Group
+- *Cylinder group* refers to tracks on different platters or surfaces that are the same distance from the center.
+- Approximate cylinder groups by dividing the disk into *block groups*.
+  - Each block contains a copy of the super block for reliability reasons.
+  - Its own bitmap, inode table and data blocks.
+
+** Policies: How To Allocate Files and Directories
+- For directories choose the block group with the least amount of allocated directories and most amount of free inodes.
+- For files try to allocate data blocks in the same BG. Also try to allocate files in the same directory in the same BG.
+
+** Measuring File Locality
+- Most file access is either to the same file or to another file in the same directory.
+
+** The Large-File Exception
+- To avoid a large file taking up an entire BG, when a file becomes big enough FFS places the next "large" chunk in another BG.
+
+** A Few Other Things About FFS
+- FFS also supported small files using *sub-blocks* which can be merged into full blocks.
+
+* Crash Consistency: FSCK and Journaling
+- File system updates often involve writes to multiple blocks. How to make sure all blocks are updates in a consistent manner in the event of a power loss?
+
+** A Detailed Example
+- An append to an inode involves:
+  - An allocation of a new block and writing data to it.
+  - An update to the inode to add the new pointer.
+  - An update to the bitmap to mark the block as allocated.
+
+** Solution #1: The File System Checker
+- Unix provides *fsck* tool for finding and repairing inconsistencies in the file system.
+  - Check superblock for corruption.
+  - Scan inodes, indirect blocks and double indirect block to build understanding of file system and of allocated blocks.
+  - Check each inode for corruption (i.e. is the type field valid?).
+  - Check reference count of inodes.
+  - Check for duplicate pointers to data between inodes.
+  - Check for bad block pointers (i.e. if it is out of range).
+  - Check directories (i.e. do they have =.= and =..= directories).
+- Fsck must read through entire file system and validate obviously valid blocks. Slow.
+
+** Solution #2: Jounaling (or Write-Ahead Logging)
+- Reserve space on the storage media for a *journal*.
+  1. *Journal write*: Write transaction begin followed by all writes (metadata + data).
+  2. *Journal commit*: Write transaction end. Must be issued after entire transaction is written to journal to avoid early commit.
+  3. *Checkpoint*: Update on-disk metadata and data blocks.
+  4. *Free*: At some point later free the journal for future use.
+- In the case of a crash, if a transaction is committed the file system replays writes on boot.
+- Journaling forces us to write data twice: once to the journal and once to disk.
+  - *Metadata journaling*: Update the data first and then journal the metadata as a transaction.
+  - Avoids rewritting the data (the bulk of the update) and ensures the metadata is left in a consistent state.
+- Special *revoke* record to discard transactions to handle edge cases of block reuse.
+
+** Solution #3: Other Approaches
+- Never delete data. Keep older versions and use *copy-on-write*. Used by Sun's ZFS.
+- *Backpointer-based consistency*: Add backpointer to inode in each data block to check if data block is still valid.
+
+* Log-structured File Systems
+- *Log-structured file systems* take advantage of the sequential writes of a disk.
+
+** Writing To Disk Sequentially
+- Inode is written directly after the data and points directly to head of data.
+
+** Writing Sequentially and Effectively
+- LFS uses *write buffering* to write blocks at once rather than immediately.
+  - Prevents missing blocks due to rotation of the disk.
+
+** How Much To Buffer?
+- The amount to buffer must be choosen carefully in order to achieve a target effective transfer rate.
+  - The time to write is:
+    \[T_{write} = T_{position} + \frac{D}{R_{peak}}\]
+  - The effective disk transfer rate is:
+    \[R_{effective} = \frac{D}{T_{write}} = \frac{D}{T_{position} + \frac{D}{R_{peak}}}\]
+  - Let \(F\) be the fraction of the peak rate we wish to achieve. Rearranging we can solve for \(D\):
+    \[D = \frac{F}{1 - F} \times R_{peak} \times T_{position}\]
+
+** Problem: Finding Inodes
+- In typical file system finding an inode is easy because they are in a central location, but in LFS they are scattered.
+
+** Solution Through Indirection: The Inode Map
+- Use an inode map to map i-numbers to the latest version of the inode on disk.
+- Where to store imap? Cannot store in central location due to expensive seeks.
+  - Store fragments or updates to imap sequentially after updated inodes.
+
+** Completing The Solution: The Checkpoint Region
+- Still need a known location to store location of imap.
+- LFS *checkpoint region (CR)* stores addresses to the latest pieces of the imap. Updated periodically (i.e. every 30sec).
+
+** Reading A File From Disk: A Recap
+- On boot, LFS reads the entire imap to memory.
+- On read, LFS consults the imap to find the location of the latest version of the inode.
+- It then reads the data associated with the inode using direct and indirect pointers.
+
+** What About Directories?
+- When creating a file, the directory containing the file must also be updated.
+
+** A New Problem: Garbage Collection
+- LFS produces many old versions of files dubbed *garbage*.
+  - Can keep old versions of files as a *versioning file system*.
+  - Periodically find and collect garbage data.
+    - Cleaning garbage data may result in holes.
+    - Better to copy out unchanged portion of file to end of log and clean entire inode.
+
+** Determining Block Liveness
+- Each data block stores the inode and offset corresponding to it in the *segment summary block*.
+  - Can be used to check if a data block is dead or alive by checking the referred inode.
+- LFS can also keep a version number for each inode in the imap.
+
+** A Policy Question: Which Blocks To Clean, And When?
+- Segregate segments as /hot/ or /cold/ and only clean cold segments.
+
+** Crash Recovery And The Log
+- LFS uses *roll forward* to rebuild uncommitted segments.
+  - LFS finds the end of the log by looking it up in the CR and reading ahead to find valid blocks.
+
+* Flash-based SSDs
+- *Solid-state storage* is built using transistors and has no moving parts unlike hard disks.
+
+** Storing a Single Bit
+- Flash chips trap charge within transistors.
+  - *Single-level cell* stores one bit per cell.
+  - *Multi-level cell* stores two bits per cell.
+  - *Triple-level cell* stores three bits per cell.
+
+** From Bits to Banks/Planes
+- Flash chips organized into sets of *banks*. Each bank contains *blocks* which in turn contain *pages*.
+
+** Basic Flash Operations
+- *Read (a page)*: Reading any location on a flash chip is fast and random access.
+- *Erase (a block)*: Before writing to a page, the entire block containing the page must be erased.
+- *Program (a page)*: After erasure each page within a block can be individually programmed with data.
+
+** Flash Performance And Reliability
+- Flash contains no moving parts and therefore no possiblity of head crash.
+- However, each flash page can only be erased and written a set number of times before *wear out*.
+- Flash cells may also suffer from *read* or *program disturbances* from nearby cells.
+
+** From Raw Flash to Flash-Based SSDs
+- Flash chips utilize a *flash translation layer* or *FTL* to translate from /logical/ blocks to /physical/ blocks. This is used to remap pages on erasure.
+- Two main goals with flash:
+  - Increase performance by reducing the *write amplification* associated with erasing blocks and remapping pages.
+  - Increase reliability by equally using each flash cell evenly also known as *wear leveling*.
+
+** FTL Organization: A Bad Approach
+- *Direct mapping* or mapping each logical page to exactly one physical page bad idea for flash.
+  - Must erase entire block and copy it along with the changes to the page.
+  - Hot pages are worn out faster than colder ones. Very user dependent.
+
+** A Log-Structured FTL
+- Writes to pages are redirected to the next available page. FTL maps to the latest version of the page.
+- *Garbage collector* frees blocks once most of the pages within the block are dead.
+
+** Garbage Collection
+- How to find which pages to garbage collect?
+  - Store LBA information within each page and check FTL if this is the current PBA for the LBA.
+- Some SSDs overprovision space dedicated to garbage collection.
+
+** Mapping Table Size
+- *Page-level* FTL takes up too much space.
+- *Block-level* FTL stores mappings from logical blocks to physical blocks. Upper bits used to index into block and lower bits used as an offset, similar to page tables in memory.
+  - Suffers from small-write problem. Write to single page requires copying entire block.
+- Use a *hybrid mapping* approach:
+  - Reserve some blocks as *log blocks* and redirect all writes to pages to them. Keep a per-page mapping for each block.
+  - Once enough sequential pages are written transfer them to data blocks.
+    - *Switch merge*: All pages of the block are written in the same order they were written to the block.
+    - *Partial merge*: Some of the pages of the block are written to.
+    - *Full merge*: Different pages from different blocks are written to.
+
+* Data Integrity and Protection
+** Data Integrity and Protection
+- Two types of failure modes:
+  - *Fail-stop*
+  - *Fail-partial*
+    - *Latent sector errors (LSEs)*: one of more blocks cannot be read by the disk.
+    - *Block corruption*: disk block is corrupted in a way not detectable disk itself.
+
+** Handling Latent Sector Errors
+- Storage controller can detect LSEs if it fails to read block and use whatever redundancy mechanism it has to recover.
+
+** Detecting Corruption: The Checksum
+- *Checksum* is the result of a function applied to a block. Used to verify the integrity of a block.
+- Types of checksums:
+  - XOR-based checksums: XOR chuncks of block data. Can only resist a unit change.
+  - *Fletcher's checksum*: Let block \(D\) consist of bytes \(d_1 \dots d_n\). Then let \(s1 = s1 + d_i mod 255\) and \(s2 = s2 + s1 mod 255\) for all \(d_i\).
+  - *Cyclic Redundancy Check (CRC)*: Treat \(D\) as large binary number of divide by an agreeded upon value \(k\).
+- Two ways to layout checksums on disk:
+  - Prepend checksums to the beginning of each corresponding block.
+  - Separate block for checksum for group of sequential blocks.
+
+** Using Checksums
+- To use checksums compare the computed checksum with the stored checksum to verify integrity.
+
+** A New Problem: Misdirected Writes
+- A *midirected write* is a correct write to disk, but at the wrong location.
+- Solution: Add *physical identifier* to checksum to verify write to correct location.
+
+** One Last Problem: Lost Writes
+- Sometimes a storage system may claim a block is written without it being persisted, known as a *lost write*.
+- Solution: After successful write perform a *read-after-write* to verify data persists.
+
+** Scrubbing
+- *Disk scrubbing* refers to when a storage system periodically checks every block to verify its integrity.
+
+** Overheads of Checksumming
+- Two kinds of overheads associated with checksum:
+  - Space overhead: Checksums take space on both disk and in memory.
+  - Time overhead: Checksums can be expensive for a CPU to compute.
